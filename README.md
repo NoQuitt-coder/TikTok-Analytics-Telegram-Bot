@@ -29,6 +29,6 @@ It uses **SocialInsider Free Tools API** to fetch TikTok insights and supports m
 ## ⚙️ Installation
 
 ```bash
-git clone https://github.com/NoQuitt-coder/tiktok-stats.git
-cd tiktok-stats
+git clone https://github.com/NoQuitt-coder/TikTok-Analytics-Telegram-Bot.git
+cd TikTok-Analytics-Telegram-Bot
 npm install
