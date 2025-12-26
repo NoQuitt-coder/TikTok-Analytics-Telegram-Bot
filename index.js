@@ -7,7 +7,7 @@ const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const BOT_ADMIN_ID = process.env.BOT_ADMIN_ID; 
 
 if (!BOT_TOKEN) {
-  console.error('Errore: manca TELEGRAM_BOT_TOKEN nel .env');
+  console.error('Error: TELEGRAM_BOT_TOKEN is missing in .env');
   process.exit(1);
 }
 
@@ -28,7 +28,7 @@ function escapeHtml(text) {
 }
 
 // =======================
-// Gestione storage
+// Storage management
 // =======================
 
 function loadSubscriptions() {
@@ -40,7 +40,7 @@ function loadSubscriptions() {
     const data = fs.readFileSync(SUBS_FILE, 'utf8');
     return JSON.parse(data || '{}');
   } catch (err) {
-    console.error('Errore loadSubscriptions:', err);
+    console.error('Error loadSubscriptions:', err);
     return {};
   }
 }
@@ -49,14 +49,14 @@ function saveSubscriptions(subs) {
   try {
     fs.writeFileSync(SUBS_FILE, JSON.stringify(subs, null, 2));
   } catch (err) {
-    console.error('Errore saveSubscriptions:', err);
+    console.error('Error saveSubscriptions:', err);
   }
 }
 
 let subscriptions = loadSubscriptions(); // { [chatId]: { tiktokHandle, lastSentAt } }
 
 // =======================
-// Helper: controllo admin
+// Admin check
 // =======================
 
 function isAdmin(msg) {
@@ -65,7 +65,7 @@ function isAdmin(msg) {
 }
 
 // =======================
-// Chiamata API TikTok
+// TikTok API Call
 // =======================
 
 async function fetchTikTokAnalytics(handleOrUrl) {
@@ -75,7 +75,7 @@ async function fetchTikTokAnalytics(handleOrUrl) {
     id: 1,
     method: 'tk_tools.free_tools',
     params: {
-      handle: handleOrUrl,               
+      handle: handleOrUrl,
       timezone: 'Europe/Rome',
       tool: 'free_video_analytics',
       auth: {
@@ -95,11 +95,11 @@ async function fetchTikTokAnalytics(handleOrUrl) {
 }
 
 // =======================
-// Formattazione messaggio (HTML)
+// Message formatting (HTML)
 // =======================
 
 function formatReportMessage(data) {
-  const profileName = data.profile_name || data.profile_id || 'Profilo';
+  const profileName = data.profile_name || data.profile_id || 'Profile';
   const handle = data.profile_id ? `@${data.profile_id}` : '';
 
   const followers = data.profile_followers?.value ?? 0;
@@ -118,28 +118,26 @@ function formatReportMessage(data) {
   const avgViewsEsc = escapeHtml(avgViews.toFixed ? avgViews.toFixed(1) : avgViews);
   const avgLikesEsc = escapeHtml(avgLikes.toFixed ? avgLikes.toFixed(1) : avgLikes);
 
-  let msg = `📊 <b>Report TikTok</b>\n`;
-  msg += `👤 Profilo: <b>${profileNameEsc}</b> ${handleEsc}\n\n`;
-  msg += `👥 Follower: <b>${followersEsc}</b>\n`;
+  let msg = `📊 <b>TikTok Report</b>\n`;
+  msg += `👤 Profile: <b>${profileNameEsc}</b> ${handleEsc}\n\n`;
+  msg += `👥 Followers: <b>${followersEsc}</b>\n`;
   msg += `🔥 Engagement rate: <b>${erEsc}%</b>\n`;
-  msg += `🎬 Post analizzati: <b>${postsEsc}</b>\n\n`;
-  msg += `👁️‍🗨️ Views totali: <b>${totalViewsEsc}</b>\n`;
-  msg += `📈 Views medie/video: <b>${avgViewsEsc}</b>\n`;
-  msg += `❤️ Like medi/video: <b>${avgLikesEsc}</b>\n`;
+  msg += `🎬 Posts analyzed: <b>${postsEsc}</b>\n\n`;
+  msg += `👁️‍🗨️ Total views: <b>${totalViewsEsc}</b>\n`;
+  msg += `📈 Avg views/video: <b>${avgViewsEsc}</b>\n`;
+  msg += `❤️ Avg likes/video: <b>${avgLikesEsc}</b>\n`;
 
   if (Array.isArray(data.top_posts) && data.top_posts.length > 0) {
     const top = data.top_posts.slice(0, 3);
-    msg += `\n🏆 <b>Top video</b>\n`;
+    msg += `\n🏆 <b>Top Videos</b>\n`;
     top.forEach((p, idx) => {
       const likes = p.like_count ?? p.diggCount ?? 0;
       const likesEsc = escapeHtml(likes);
       const link = p.si_permalink || p.permalink || p.si_picture || '';
       const linkEsc = escapeHtml(link);
 
-      msg += `${idx + 1}) ❤️ ${likesEsc} like\n`;
-      if (link) {
-        msg += `${linkEsc}\n`;
-      }
+      msg += `${idx + 1}) ❤️ ${likesEsc} likes\n`;
+      if (link) msg += `${linkEsc}\n`;
     });
   }
 
@@ -147,7 +145,7 @@ function formatReportMessage(data) {
 }
 
 // =======================
-// Invio report per una chat
+// Send report to chat
 // =======================
 
 async function sendReportToChat(chatId, tiktokHandle) {
@@ -161,27 +159,27 @@ async function sendReportToChat(chatId, tiktokHandle) {
     subscriptions[chatId].lastSentAt = new Date().toISOString();
     saveSubscriptions(subscriptions);
   } catch (err) {
-    console.error(`Errore nel report per chat ${chatId}:`, err?.response?.data || err.message);
+    console.error(`Error sending report to chat ${chatId}:`, err?.response?.data || err.message);
     await bot.sendMessage(
       chatId,
-      '⚠️ Errore nel recupero dei dati TikTok. Riproverò al prossimo ciclo.'
+      '⚠️ Error fetching TikTok data. I will try again on the next cycle.'
     ).catch(() => {});
   }
 }
 
 // =======================
-// Scheduler ogni 12 ore
+// Scheduler every 12 hours
 // =======================
 
 const TWELVE_HOURS_MS = 12 * 60 * 60 * 1000;
 
 async function runSchedulerCycle() {
-  console.log('Esecuzione ciclo scheduler', new Date().toISOString());
-  const entries = Object.entries(subscriptions); // [ [chatId, {..}], ... ]
+  console.log('Scheduler cycle running', new Date().toISOString());
+  const entries = Object.entries(subscriptions);
 
   for (const [chatId, info] of entries) {
     if (!info.tiktokHandle) continue;
-    console.log(`Invio report per chat ${chatId} (${info.tiktokHandle})`);
+    console.log(`Sending report to chat ${chatId} (${info.tiktokHandle})`);
     await sendReportToChat(chatId, info.tiktokHandle);
     await new Promise(res => setTimeout(res, 1500));
   }
@@ -191,21 +189,21 @@ runSchedulerCycle();
 setInterval(runSchedulerCycle, TWELVE_HOURS_MS);
 
 // =======================
-// Comandi Telegram
+// Telegram Commands
 // =======================
 
 bot.onText(/^\/start/, (msg) => {
   const text =
-    'Ciao! Sono il bot report TikTok.\n' +
-    'Comandi disponibili (solo admin):\n' +
-    '/add &lt;link_tiktok&gt; &lt;id_chat&gt;\n' +
-    '/rem &lt;id_chat&gt;\n' +
+    'Hello! I am the TikTok report bot.\n' +
+    'Available commands (admin only):\n' +
+    '/add &lt;tiktok_link&gt; &lt;chat_id&gt;\n' +
+    '/rem &lt;chat_id&gt;\n' +
     '/list';
 
   bot.sendMessage(msg.chat.id, text, { parse_mode: 'HTML' });
 });
 
-// /add link_tiktok id_chat
+// /add link chatId
 bot.onText(/^\/add(?:@[\w_]+)?\s+(\S+)(?:\s+(-?\d+))?/, (msg, match) => {
   if (!isAdmin(msg)) return;
 
@@ -223,12 +221,12 @@ bot.onText(/^\/add(?:@[\w_]+)?\s+(\S+)(?:\s+(-?\d+))?/, (msg, match) => {
 
   bot.sendMessage(
     msg.chat.id,
-    `✅ Aggiunto report per chat <b>${chatIdEsc}</b> sul profilo:\n${linkEsc}`,
+    `✅ Added report for chat <b>${chatIdEsc}</b> on profile:\n${linkEsc}`,
     { parse_mode: 'HTML' }
   );
 });
 
-// /rem id_chat
+// /rem chatId
 bot.onText(/^\/rem(?:@[\w_]+)?\s+(-?\d+)/, (msg, match) => {
   if (!isAdmin(msg)) return;
 
@@ -238,13 +236,13 @@ bot.onText(/^\/rem(?:@[\w_]+)?\s+(-?\d+)/, (msg, match) => {
     saveSubscriptions(subscriptions);
     bot.sendMessage(
       msg.chat.id,
-      `🗑️ Rimossa chat <b>${escapeHtml(chatIdToRemove)}</b> dalla lista report.`,
+      `🗑️ Removed chat <b>${escapeHtml(chatIdToRemove)}</b> from reports.`,
       { parse_mode: 'HTML' }
     );
   } else {
     bot.sendMessage(
       msg.chat.id,
-      `❓ Chat <b>${escapeHtml(chatIdToRemove)}</b> non trovata.`,
+      `❓ Chat <b>${escapeHtml(chatIdToRemove)}</b> not found.`,
       { parse_mode: 'HTML' }
     );
   }
@@ -256,23 +254,23 @@ bot.onText(/^\/list/, (msg) => {
 
   const entries = Object.entries(subscriptions);
   if (entries.length === 0) {
-    return bot.sendMessage(msg.chat.id, '📭 Nessuna chat configurata.', {
+    return bot.sendMessage(msg.chat.id, '📭 No chat configured.', {
       parse_mode: 'HTML'
     });
   }
 
-  let text = '📋 <b>Chat configurate</b>\n\n';
+  let text = '📋 <b>Configured chats</b>\n\n';
   for (const [chatId, info] of entries) {
     const chatIdEsc = escapeHtml(chatId);
     const linkEsc = escapeHtml(info.tiktokHandle);
-    const lastSentEsc = info.lastSentAt ? escapeHtml(info.lastSentAt) : 'mai';
+    const lastSentEsc = info.lastSentAt ? escapeHtml(info.lastSentAt) : 'never';
 
     text += `• Chat ID: <b>${chatIdEsc}</b>\n`;
     text += `  TikTok: ${linkEsc}\n`;
-    text += `  Ultimo invio: ${lastSentEsc}\n\n`;
+    text += `  Last sent: ${lastSentEsc}\n\n`;
   }
 
   bot.sendMessage(msg.chat.id, text, { parse_mode: 'HTML' });
 });
 
-console.log('Bot avviato...');
+console.log('Bot started...');
