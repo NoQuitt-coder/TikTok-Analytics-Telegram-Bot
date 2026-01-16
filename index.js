@@ -2,9 +2,10 @@ require('dotenv').config();
 const fs = require('fs');
 const axios = require('axios');
 const TelegramBot = require('node-telegram-bot-api');
+const cheerio = require('cheerio');
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const BOT_ADMIN_ID = process.env.BOT_ADMIN_ID; 
+const BOT_ADMIN_ID = process.env.BOT_ADMIN_ID;
 
 if (!BOT_TOKEN) {
   console.error('Error: TELEGRAM_BOT_TOKEN is missing in .env');
@@ -53,7 +54,7 @@ function saveSubscriptions(subs) {
   }
 }
 
-let subscriptions = loadSubscriptions(); // { [chatId]: { tiktokHandle, lastSentAt } }
+let subscriptions = loadSubscriptions(); // { [chatId]: { username, lastSentAt } }
 
 // =======================
 // Admin check
@@ -65,81 +66,135 @@ function isAdmin(msg) {
 }
 
 // =======================
-// TikTok API Call
+// Username extraction
 // =======================
 
-async function fetchTikTokAnalytics(handleOrUrl) {
-  const url = 'https://free-tools.socialinsider.io/api';
+function extractTikTokUsername(inputRaw) {
+  const input = String(inputRaw || '').trim();
+  if (/^@[\w.]+$/.test(input)) return input.slice(1);
+  if (/^[\w.]+$/.test(input)) return input;
+  const m = input.match(/@([\w.]+)/);
+  if (m && m[1]) return m[1];
+  return null;
+}
 
-  const payload = {
-    id: 1,
-    method: 'tk_tools.free_tools',
-    params: {
-      handle: handleOrUrl,
-      timezone: 'Europe/Rome',
-      tool: 'free_video_analytics',
-      auth: {
-        dashboardVersion: 1
-      }
-    }
+function buildCountikUrl(username) {
+  return `https://countik.com/tiktok-analytics/user/@${encodeURIComponent(username)}`;
+}
+
+// =======================
+// Countik scrape + parse
+// =======================
+
+function normalizeNumberString(s) {
+  if (s == null) return null;
+  let t = String(s).trim();
+  t = t.replace(/\s+/g, '').replace(/,/g, '').replace(/\./g, '');
+  if (/^\d+$/.test(t)) return t;
+  return String(s).trim(); 
+}
+
+function normalizePercentString(s) {
+  if (s == null) return null;
+  let t = String(s).trim();
+  t = t.replace(/\s+/g, '');
+  if (!t.endsWith('%') && /^\d+(\.\d+)?$/.test(t)) t += '%';
+  return t;
+}
+
+function parseCountikHtml(html) {
+  const $ = cheerio.load(html);
+
+  const stats = {
+    followers: null,
+    likes: null,
+    videos: null,
+    following: null,
+    overallEngagement: null
   };
 
-  const res = await axios.post(url, payload, {
-    headers: {
-      'Content-Type': 'application/json',
-      'Accept': 'application/json'
+  $('.item.four.user-stats .block').each((_, el) => {
+    const label = $(el).find('h3').first().text().trim().toLowerCase();
+    const value = $(el).find('p').first().text().trim();
+
+    if (label.includes('total followers')) stats.followers = normalizeNumberString(value);
+    else if (label.includes('total likes')) stats.likes = normalizeNumberString(value);
+    else if (label.includes('total videos')) stats.videos = normalizeNumberString(value);
+    else if (label === 'following' || label.includes('following')) stats.following = normalizeNumberString(value);
+  });
+
+  $('.item.four.total-engagement-rates .block').each((_, el) => {
+    const h3 = $(el).find('h3').first().text().trim().toLowerCase();
+    if (h3 === 'overall engagement') {
+      const pText = $(el).find('p').first().text().trim();
+      const percentMatch = pText.match(/(\d+(?:\.\d+)?)\s*%/);
+      stats.overallEngagement = normalizePercentString(percentMatch ? `${percentMatch[1]}%` : pText);
     }
   });
 
-  return res.data;
+  const title = $('title').text().trim();
+  stats.pageTitle = title || null;
+
+  return stats;
+}
+
+async function fetchTikTokAnalyticsFromCountik(username) {
+  const url = buildCountikUrl(username);
+
+  const res = await axios.get(url, {
+    headers: {
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'Accept-Language': 'it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7',
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Referer': 'https://countik.com/'
+    },
+    timeout: 20000,
+    maxRedirects: 5
+  });
+
+  const html = res.data;
+  const parsed = parseCountikHtml(html);
+
+  const hasAny =
+    parsed.followers !== null ||
+    parsed.likes !== null ||
+    parsed.videos !== null ||
+    parsed.following !== null ||
+    parsed.overallEngagement !== null;
+
+  if (!hasAny) {
+    const hint = `Parse returned empty stats (maybe blocked or DOM changed).`;
+    const err = new Error(hint);
+    err._debug = { url, status: res.status };
+    throw err;
+  }
+
+  return { username, url, ...parsed };
 }
 
 // =======================
 // Message formatting (HTML)
 // =======================
 
-function formatReportMessage(data) {
-  const profileName = data.profile_name || data.profile_id || 'Profile';
-  const handle = data.profile_id ? `@${data.profile_id}` : '';
+function formatReportMessageCountik(data) {
+  const username = data.username ? `@${data.username}` : '@unknown';
+  const usernameEsc = escapeHtml(username);
+  const urlEsc = escapeHtml(data.url || '');
 
-  const followers = data.profile_followers?.value ?? 0;
-  const er = data.engagement_rate?.float_2f ?? 0;
-  const totalViews = data.video_views?.abbr_string_1f ?? data.video_views?.value ?? 0;
-  const avgViews = data.average_video_views_per_post?.float_1f ?? 0;
-  const avgLikes = data.likes?.float_1f ?? 0;
-  const posts = data.posts ?? 0;
-
-  const profileNameEsc = escapeHtml(profileName);
-  const handleEsc = escapeHtml(handle);
-  const totalViewsEsc = escapeHtml(totalViews);
-  const followersEsc = escapeHtml(followers);
-  const erEsc = escapeHtml(er);
-  const postsEsc = escapeHtml(posts);
-  const avgViewsEsc = escapeHtml(avgViews.toFixed ? avgViews.toFixed(1) : avgViews);
-  const avgLikesEsc = escapeHtml(avgLikes.toFixed ? avgLikes.toFixed(1) : avgLikes);
+  const followersEsc = escapeHtml(data.followers ?? '—');
+  const likesEsc = escapeHtml(data.likes ?? '—');
+  const videosEsc = escapeHtml(data.videos ?? '—');
+  const followingEsc = escapeHtml(data.following ?? '—');
+  const overallEngEsc = escapeHtml(data.overallEngagement ?? '—');
 
   let msg = `📊 <b>TikTok Report</b>\n`;
-  msg += `👤 Profile: <b>${profileNameEsc}</b> ${handleEsc}\n\n`;
-  msg += `👥 Followers: <b>${followersEsc}</b>\n`;
-  msg += `🔥 Engagement rate: <b>${erEsc}%</b>\n`;
-  msg += `🎬 Posts analyzed: <b>${postsEsc}</b>\n\n`;
-  msg += `👁️‍🗨️ Total views: <b>${totalViewsEsc}</b>\n`;
-  msg += `📈 Avg views/video: <b>${avgViewsEsc}</b>\n`;
-  msg += `❤️ Avg likes/video: <b>${avgLikesEsc}</b>\n`;
-
-  if (Array.isArray(data.top_posts) && data.top_posts.length > 0) {
-    const top = data.top_posts.slice(0, 3);
-    msg += `\n🏆 <b>Top Videos</b>\n`;
-    top.forEach((p, idx) => {
-      const likes = p.like_count ?? p.diggCount ?? 0;
-      const likesEsc = escapeHtml(likes);
-      const link = p.si_permalink || p.permalink || p.si_picture || '';
-      const linkEsc = escapeHtml(link);
-
-      msg += `${idx + 1}) ❤️ ${likesEsc} likes\n`;
-      if (link) msg += `${linkEsc}\n`;
-    });
-  }
+  msg += `👤 Profile: <b>${usernameEsc}</b>\n\n`;
+  msg += `👥 Total Followers: <b>${followersEsc}</b>\n`;
+  msg += `❤️ Total Likes: <b>${likesEsc}</b>\n`;
+  msg += `🎬 Total Videos: <b>${videosEsc}</b>\n`;
+  msg += `➕ Following: <b>${followingEsc}</b>\n\n`;
+  msg += `🔥 Overall Engagement: <b>${overallEngEsc}</b>\n`;
 
   return msg;
 }
@@ -148,45 +203,46 @@ function formatReportMessage(data) {
 // Send report to chat
 // =======================
 
-async function sendReportToChat(chatId, tiktokHandle) {
+async function sendReportToChat(chatId, username) {
   try {
-    const data = await fetchTikTokAnalytics(tiktokHandle);
-    const message = formatReportMessage(data);
+    const data = await fetchTikTokAnalyticsFromCountik(username);
+    const message = formatReportMessageCountik(data);
+
     await bot.sendMessage(chatId, message, {
       parse_mode: 'HTML',
-      disable_web_page_preview: false
+      disable_web_page_preview: true
     });
+
     subscriptions[chatId].lastSentAt = new Date().toISOString();
     saveSubscriptions(subscriptions);
   } catch (err) {
-    console.error(`Error sending report to chat ${chatId}:`, err?.response?.data || err.message);
-    await bot.sendMessage(
-      chatId,
-      '⚠️ Error fetching TikTok data. I will try again on the next cycle.'
-    ).catch(() => {});
+    console.error(`Error sending report to chat ${chatId}:`, err?.response?.data || err.message, err?._debug || '');
+    await bot
+      .sendMessage(chatId, '⚠️ Error fetching TikTok data from Countik. I will try again on the next cycle.')
+      .catch(() => {});
   }
 }
 
 // =======================
-// Scheduler every 12 hours
+// Scheduler every 24 hours
 // =======================
 
-const TWELVE_HOURS_MS = 12 * 60 * 60 * 1000;
+const EVERY_24_HOURS_MS = 24 * 60 * 60 * 1000;
 
 async function runSchedulerCycle() {
   console.log('Scheduler cycle running', new Date().toISOString());
   const entries = Object.entries(subscriptions);
 
   for (const [chatId, info] of entries) {
-    if (!info.tiktokHandle) continue;
-    console.log(`Sending report to chat ${chatId} (${info.tiktokHandle})`);
-    await sendReportToChat(chatId, info.tiktokHandle);
+    if (!info.username) continue;
+    console.log(`Sending report to chat ${chatId} (@${info.username})`);
+    await sendReportToChat(chatId, info.username);
     await new Promise(res => setTimeout(res, 1500));
   }
 }
 
 runSchedulerCycle();
-setInterval(runSchedulerCycle, TWELVE_HOURS_MS);
+setInterval(runSchedulerCycle, EVERY_24_HOURS_MS);
 
 // =======================
 // Telegram Commands
@@ -196,32 +252,39 @@ bot.onText(/^\/start/, (msg) => {
   const text =
     'Hello! I am the TikTok report bot.\n' +
     'Available commands (admin only):\n' +
-    '/add &lt;tiktok_link&gt; &lt;chat_id&gt;\n' +
+    '/add &lt;@username|username|tiktok_url&gt; &lt;chat_id&gt;\n' +
     '/rem &lt;chat_id&gt;\n' +
     '/list';
 
   bot.sendMessage(msg.chat.id, text, { parse_mode: 'HTML' });
 });
 
-// /add link chatId
+// /add input chatId
 bot.onText(/^\/add(?:@[\w_]+)?\s+(\S+)(?:\s+(-?\d+))?/, (msg, match) => {
   if (!isAdmin(msg)) return;
 
-  const tiktokLink = match[1];
+  const input = match[1];
   const chatIdToUse = match[2] ? match[2] : String(msg.chat.id);
 
+  const username = extractTikTokUsername(input);
+  if (!username) {
+    return bot.sendMessage(msg.chat.id, '❌ Invalid input. Use @username, username or a TikTok/Countik URL.', {
+      parse_mode: 'HTML'
+    });
+  }
+
   subscriptions[chatIdToUse] = {
-    tiktokHandle: tiktokLink,
+    username,
     lastSentAt: null
   };
   saveSubscriptions(subscriptions);
 
   const chatIdEsc = escapeHtml(chatIdToUse);
-  const linkEsc = escapeHtml(tiktokLink);
+  const usernameEsc = escapeHtml(`@${username}`);
 
   bot.sendMessage(
     msg.chat.id,
-    `✅ Added report for chat <b>${chatIdEsc}</b> on profile:\n${linkEsc}`,
+    `✅ Added report for chat <b>${chatIdEsc}</b> on profile: <b>${usernameEsc}</b>`,
     { parse_mode: 'HTML' }
   );
 });
@@ -262,11 +325,11 @@ bot.onText(/^\/list/, (msg) => {
   let text = '📋 <b>Configured chats</b>\n\n';
   for (const [chatId, info] of entries) {
     const chatIdEsc = escapeHtml(chatId);
-    const linkEsc = escapeHtml(info.tiktokHandle);
+    const userEsc = escapeHtml(info.username ? `@${info.username}` : '—');
     const lastSentEsc = info.lastSentAt ? escapeHtml(info.lastSentAt) : 'never';
 
     text += `• Chat ID: <b>${chatIdEsc}</b>\n`;
-    text += `  TikTok: ${linkEsc}\n`;
+    text += `  TikTok: <b>${userEsc}</b>\n`;
     text += `  Last sent: ${lastSentEsc}\n\n`;
   }
 
