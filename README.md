@@ -1,7 +1,7 @@
 # TikTok Analytics Telegram Bot
 
 A Telegram bot that automatically sends scheduled TikTok analytics reports to configured chats.  
-It uses **SocialInsider Free Tools API** to fetch TikTok insights and supports multiple chat subscriptions with persistent storage.
+It uses **Countik Free Tools** to fetch TikTok insights and supports multiple chat subscriptions with persistent storage.
 
 ---
 
@@ -12,7 +12,7 @@ It uses **SocialInsider Free Tools API** to fetch TikTok insights and supports m
 - Supports multiple chats
 - Persistent subscriptions via JSON file
 - Admin-only management commands
-- Automatic scheduler every **12 hours**
+- Automatic scheduler every **24 hours**
 - Safe HTML escaping
 - Error handling and retry next cycle
 
