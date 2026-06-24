@@ -2,7 +2,6 @@ require('dotenv').config();
 const fs = require('fs');
 const axios = require('axios');
 const TelegramBot = require('node-telegram-bot-api');
-const cheerio = require('cheerio');
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const BOT_ADMIN_ID = process.env.BOT_ADMIN_ID;
@@ -26,6 +25,16 @@ function escapeHtml(text) {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
+}
+
+function formatNumber(n) {
+  if (n === null || n === undefined) return '—';
+  const num = Number(n);
+  if (isNaN(num)) return String(n);
+  if (num >= 1_000_000_000) return (num / 1_000_000_000).toFixed(1).replace(/\.0$/, '') + 'B';
+  if (num >= 1_000_000) return (num / 1_000_000).toFixed(1).replace(/\.0$/, '') + 'M';
+  if (num >= 1_000) return (num / 1_000).toFixed(1).replace(/\.0$/, '') + 'K';
+  return num.toLocaleString('it-IT');
 }
 
 // =======================
@@ -78,123 +87,80 @@ function extractTikTokUsername(inputRaw) {
   return null;
 }
 
-function buildCountikUrl(username) {
-  return `https://countik.com/tiktok-analytics/user/@${encodeURIComponent(username)}`;
-}
-
 // =======================
-// Countik scrape + parse
+// Countik API fetch
 // =======================
-
-function normalizeNumberString(s) {
-  if (s == null) return null;
-  let t = String(s).trim();
-  t = t.replace(/\s+/g, '').replace(/,/g, '').replace(/\./g, '');
-  if (/^\d+$/.test(t)) return t;
-  return String(s).trim(); 
-}
-
-function normalizePercentString(s) {
-  if (s == null) return null;
-  let t = String(s).trim();
-  t = t.replace(/\s+/g, '');
-  if (!t.endsWith('%') && /^\d+(\.\d+)?$/.test(t)) t += '%';
-  return t;
-}
-
-function parseCountikHtml(html) {
-  const $ = cheerio.load(html);
-
-  const stats = {
-    followers: null,
-    likes: null,
-    videos: null,
-    following: null,
-    overallEngagement: null
-  };
-
-  $('.item.four.user-stats .block').each((_, el) => {
-    const label = $(el).find('h3').first().text().trim().toLowerCase();
-    const value = $(el).find('p').first().text().trim();
-
-    if (label.includes('total followers')) stats.followers = normalizeNumberString(value);
-    else if (label.includes('total likes')) stats.likes = normalizeNumberString(value);
-    else if (label.includes('total videos')) stats.videos = normalizeNumberString(value);
-    else if (label === 'following' || label.includes('following')) stats.following = normalizeNumberString(value);
-  });
-
-  $('.item.four.total-engagement-rates .block').each((_, el) => {
-    const h3 = $(el).find('h3').first().text().trim().toLowerCase();
-    if (h3 === 'overall engagement') {
-      const pText = $(el).find('p').first().text().trim();
-      const percentMatch = pText.match(/(\d+(?:\.\d+)?)\s*%/);
-      stats.overallEngagement = normalizePercentString(percentMatch ? `${percentMatch[1]}%` : pText);
-    }
-  });
-
-  const title = $('title').text().trim();
-  stats.pageTitle = title || null;
-
-  return stats;
-}
 
 async function fetchTikTokAnalyticsFromCountik(username) {
-  const url = buildCountikUrl(username);
+  const url = `https://countik.com/api/exist/${encodeURIComponent(username)}`;
 
   const res = await axios.get(url, {
     headers: {
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'Accept': 'application/json, text/plain, */*',
       'Accept-Language': 'it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7',
-      'User-Agent':
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      'Referer': 'https://countik.com/'
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
+      'Referer': `https://countik.com/tiktok-analytics/user/${username}`,
+      'Origin': 'https://countik.com',
     },
-    timeout: 20000,
-    maxRedirects: 5
+    timeout: 15000,
+    maxRedirects: 5,
   });
 
-  const html = res.data;
-  const parsed = parseCountikHtml(html);
+  const data = res.data;
 
-  const hasAny =
-    parsed.followers !== null ||
-    parsed.likes !== null ||
-    parsed.videos !== null ||
-    parsed.following !== null ||
-    parsed.overallEngagement !== null;
-
-  if (!hasAny) {
-    const hint = `Parse returned empty stats (maybe blocked or DOM changed).`;
-    const err = new Error(hint);
-    err._debug = { url, status: res.status };
+  if (data.status !== 'success') {
+    const err = new Error(data.message || 'Countik API returned non-success');
+    err._debug = { url, status: res.status, response: data };
     throw err;
   }
 
-  return { username, url, ...parsed };
+  return {
+    username: data.uniqueId || username,
+    nickname: data.nickname || username,
+    avatarThumb: data.avatarThumb || null,
+    followers: data.followerCount ?? null,
+    likes: data.heartCount ?? null,
+    videos: data.videoCount ?? null,
+    following: data.followingCount ?? null,
+    verified: data.verified || false,
+    language: data.language || null,
+    id: data.id || null,
+  };
 }
 
 // =======================
 // Message formatting (HTML)
 // =======================
 
-function formatReportMessageCountik(data) {
+function formatReportMessage(data) {
   const username = data.username ? `@${data.username}` : '@unknown';
   const usernameEsc = escapeHtml(username);
-  const urlEsc = escapeHtml(data.url || '');
+  const nicknameEsc = escapeHtml(data.nickname || username);
 
-  const followersEsc = escapeHtml(data.followers ?? '—');
-  const likesEsc = escapeHtml(data.likes ?? '—');
-  const videosEsc = escapeHtml(data.videos ?? '—');
-  const followingEsc = escapeHtml(data.following ?? '—');
-  const overallEngEsc = escapeHtml(data.overallEngagement ?? '—');
+  const followersEsc = escapeHtml(formatNumber(data.followers));
+  const likesEsc = escapeHtml(formatNumber(data.likes));
+  const videosEsc = escapeHtml(formatNumber(data.videos));
+  const followingEsc = escapeHtml(formatNumber(data.following));
+  const verifiedBadge = data.verified ? ' ✅' : '';
 
-  let msg = `📊 <b>TikTok Report</b>\n`;
-  msg += `👤 Profile: <b>${usernameEsc}</b>\n\n`;
-  msg += `👥 Total Followers: <b>${followersEsc}</b>\n`;
-  msg += `❤️ Total Likes: <b>${likesEsc}</b>\n`;
-  msg += `🎬 Total Videos: <b>${videosEsc}</b>\n`;
-  msg += `➕ Following: <b>${followingEsc}</b>\n\n`;
-  msg += `🔥 Overall Engagement: <b>${overallEngEsc}</b>\n`;
+  let msg = `📊 <b>TikTok Report</b>
+`;
+  msg += `👤 Profile: <b>${nicknameEsc}${verifiedBadge}</b> (${usernameEsc})
+
+`;
+  msg += `👥 Total Followers: <b>${followersEsc}</b>
+`;
+  msg += `❤️ Total Likes: <b>${likesEsc}</b>
+`;
+  msg += `🎬 Total Videos: <b>${videosEsc}</b>
+`;
+  msg += `➕ Following: <b>${followingEsc}</b>
+`;
+
+  if (data.language) {
+    msg += `🌐 Language: <b>${escapeHtml(data.language.toUpperCase())}</b>
+`;
+  }
 
   return msg;
 }
@@ -206,11 +172,11 @@ function formatReportMessageCountik(data) {
 async function sendReportToChat(chatId, username) {
   try {
     const data = await fetchTikTokAnalyticsFromCountik(username);
-    const message = formatReportMessageCountik(data);
+    const message = formatReportMessage(data);
 
     await bot.sendMessage(chatId, message, {
       parse_mode: 'HTML',
-      disable_web_page_preview: true
+      disable_web_page_preview: true,
     });
 
     subscriptions[chatId].lastSentAt = new Date().toISOString();
@@ -269,13 +235,13 @@ bot.onText(/^\/add(?:@[\w_]+)?\s+(\S+)(?:\s+(-?\d+))?/, (msg, match) => {
   const username = extractTikTokUsername(input);
   if (!username) {
     return bot.sendMessage(msg.chat.id, '❌ Invalid input. Use @username, username or a TikTok/Countik URL.', {
-      parse_mode: 'HTML'
+      parse_mode: 'HTML',
     });
   }
 
   subscriptions[chatIdToUse] = {
     username,
-    lastSentAt: null
+    lastSentAt: null,
   };
   saveSubscriptions(subscriptions);
 
@@ -318,7 +284,7 @@ bot.onText(/^\/list/, (msg) => {
   const entries = Object.entries(subscriptions);
   if (entries.length === 0) {
     return bot.sendMessage(msg.chat.id, '📭 No chat configured.', {
-      parse_mode: 'HTML'
+      parse_mode: 'HTML',
     });
   }
 
